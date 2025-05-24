@@ -1,6 +1,6 @@
-# SecProxy
+# ProxyMiTM Tool
 
-SecProxy é um proxy HTTP/HTTPS desenvolvido em Go que intercepta, inspeciona e registra tráfego de rede em formato **HAR (HTTP Archive)**. Este projeto visa fornecer uma ferramenta eficiente para análise de tráfego, debug de APIs e monitoramento de comunicações HTTP, com foco em segurança e rastreabilidade.
+ProxyMiTM Tool é um proxy HTTP/HTTPS desenvolvido em Go que intercepta, inspeciona e registra tráfego de rede em formato **HAR (HTTP Archive)**. Este projeto visa fornecer uma ferramenta eficiente para análise de tráfego, debug de APIs e monitoramento de comunicações HTTP, com foco em segurança e rastreabilidade.
 
 ---
 
