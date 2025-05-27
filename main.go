@@ -2,14 +2,14 @@ package main
 
 import (
 	"crypto/tls"
-	//"crypto/x509" // Not implemented make certificate dinamic mode
+	//"crypto/x509"
 	"bytes"
 	"encoding/json"
+	"flag"
 	"io"
 	"log"
 	"net/http"
 	"os"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -17,26 +17,7 @@ import (
 	"github.com/elazarl/goproxy"
 )
 
-// Previnir race condition
-var mu sync.RWMutex
-
-var targetDomain = "api.example.com"
-var targetPaths = []string{"/test", "/user"}
-var targetMethods = []string{"POST", "GET"}
-
-var harLog = HARLog{
-	Log: struct {
-		Version string     `json:"version"`
-		Creator HARCreator `json:"creator"`
-		Pages   []HARPage  `json:"pages"`
-		Entries []HAREntry `json:"entries"`
-	}{
-		Version: "1.0",
-		Creator: HARCreator{Name: "SecProxy", Version: "1.0"},
-		Pages:   []HARPage{},
-		Entries: []HAREntry{},
-	},
-}
+// -------------------- Tipos HAR ---------------------
 
 type HARLog struct {
 	Log struct {
@@ -60,7 +41,7 @@ type HARCreator struct {
 
 type HAREntry struct {
 	StartedDateTime string      `json:"startedDateTime"`
-	Time            int64       `json:"time"` // tempo total em ms (não implementado)
+	Time            int64       `json:"time"` // tempo total em ms (ainda não implementado)
 	Request         HARRequest  `json:"request"`
 	Response        HARResponse `json:"response"`
 }
@@ -103,20 +84,85 @@ type HARContent struct {
 	Text     string `json:"text"`
 }
 
-func headersToHAR(headers http.Header) []HARNameValue {
-	harHeaders := make([]HARNameValue, 0, len(headers))
-	for k, v := range headers {
-		harHeaders = append(harHeaders, HARNameValue{Name: k, Value: strings.Join(v, ",")})
+// ----------------- Variáveis globais ------------------
+
+var (
+	targetDomain  string = ""
+	targetPaths          = []string{"/admin"}
+	targetMethods        = []string{"GET", "POST"}
+
+	harLog = HARLog{
+		Log: struct {
+			Version string     `json:"version"`
+			Creator HARCreator `json:"creator"`
+			Pages   []HARPage  `json:"pages"`
+			Entries []HAREntry `json:"entries"`
+		}{
+			Version: "1.2",
+			Creator: HARCreator{Name: "MyProxy", Version: "1.2"},
+			Pages:   []HARPage{},
+			Entries: []HAREntry{},
+		},
 	}
-	return harHeaders
+
+	harMutex sync.RWMutex
+)
+
+// ----------- Funções auxiliares -----------
+
+func headersToHAR(headers http.Header) []HARNameValue {
+	result := make([]HARNameValue, 0, len(headers))
+	for k, vs := range headers {
+		for _, v := range vs {
+			result = append(result, HARNameValue{Name: k, Value: v})
+		}
+	}
+	return result
 }
 
 func queryToHAR(query map[string][]string) []HARNameValue {
-	harQuery := make([]HARNameValue, 0, len(query))
-	for k, v := range query {
-		harQuery = append(harQuery, HARNameValue{Name: k, Value: strings.Join(v, ",")})
+	result := make([]HARNameValue, 0, len(query))
+	for k, vs := range query {
+		for _, v := range vs {
+			result = append(result, HARNameValue{Name: k, Value: v})
+		}
 	}
-	return harQuery
+	return result
+}
+
+func shouldLog(req *http.Request) bool {
+	host := req.URL.Hostname()
+
+	if host == "" {
+		host = req.Host
+	}
+
+	if !strings.HasSuffix(host, targetDomain) {
+		return false
+	}
+
+	pathMatch := false
+
+	for _, p := range targetPaths {
+		if strings.HasPrefix(req.URL.Path, p) {
+			pathMatch = true
+			break
+		}
+	}
+
+	if !pathMatch {
+		return false
+	}
+
+	method := strings.ToUpper(req.Method)
+
+	for _, m := range targetMethods {
+		if method == strings.ToUpper(m) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func createHAREntry(req *http.Request, resp *http.Response, reqBody, respBody []byte) HAREntry {
@@ -158,51 +204,7 @@ func createHAREntry(req *http.Request, resp *http.Response, reqBody, respBody []
 	}
 }
 
-func saveHARToFile(filename string) {
-
-	mu.RLock()
-	defer mu.RUnlock()
-
-	file, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-
-	if err != nil {
-		log.Println("[Erro ao abrir arquivo HAR]", err)
-		return
-	}
-	defer file.Close()
-
-	enc := json.NewEncoder(file)
-	enc.SetIndent("", "	")
-	err = enc.Encode(harLog)
-	if err != nil {
-		log.Println("[Erro ao salvar HAR]", err)
-	}
-
-}
-
-func shouldLog(req *http.Request) bool {
-	host := req.URL.Hostname()
-
-	if host == "" {
-		host = req.Host
-	}
-	if !strings.HasSuffix(host, targetDomain) {
-		return false
-	}
-
-	pathMatch := false
-	for _, p := range targetPaths {
-		if strings.HasPrefix(req.URL.Path, p) {
-			pathMatch = true
-			break
-		}
-	}
-	if !pathMatch {
-		return false
-	}
-
-	return slices.Contains(targetMethods, req.Method)
-}
+// -------------- Proxy com Goproxy -----------------
 
 type ProxyData struct {
 	ReqBody  []byte
@@ -210,7 +212,38 @@ type ProxyData struct {
 }
 
 func main() {
+
+	// Define flags para receber parâmetros
+	targetDomainF := flag.String("target-domain", "api.exemple.com", "Domínio alvo para interceptação")
+	targetPathsF := flag.String("target-paths", "/user,/admin", "Paths alvo, separados por vírgula")
+	targetMethodsF := flag.String("target-methods", "POST,GET", "Métodos HTTP alvo, separados por vírgula")
+	verbose := flag.Bool("verbose", false, "Habilitar logs detalhados")
+
+	flag.Parse()
+
+	targetDomain = *targetDomainF
+	pathsRaw := strings.Split(*targetPathsF, ",")
+	targetMethods = strings.Split(*targetMethodsF, ",")
+
+	targetPaths = make([]string, 0, len(pathsRaw))
+
+	for _, p := range pathsRaw {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			targetPaths = append(targetPaths, p)
+		}
+	}
+
+	if *verbose {
+		log.Println("Verbose ativado")
+		log.Printf("Dominio alvo: %s\n", *targetDomainF)
+		log.Printf("Paths alvo: %v\n", targetPaths)
+		log.Printf("Métodos alvo: %v\n", targetMethods)
+
+	}
+
 	cert, err := tls.LoadX509KeyPair("ca-cert.pem", "ca-key.pem")
+
 	if err != nil {
 		log.Fatalf("Erro ao carregar certificado: %v", err)
 	}
@@ -218,7 +251,7 @@ func main() {
 	goproxy.GoproxyCa = cert
 
 	proxy := goproxy.NewProxyHttpServer()
-	proxy.Verbose = false
+	proxy.Verbose = *verbose
 
 	proxy.OnRequest().HandleConnect(goproxy.AlwaysMitm)
 
@@ -270,8 +303,9 @@ func main() {
 
 			if shouldLog(ctx.Req) {
 				entry := createHAREntry(ctx.Req, resp, reqBody, respBody)
+				harMutex.Lock()
 				harLog.Log.Entries = append(harLog.Log.Entries, entry)
-
+				harMutex.Unlock()
 			}
 
 			return resp
@@ -287,7 +321,29 @@ func main() {
 
 	}()
 
-	log.Println("Proxy rodando na porta 8080")
-	log.Fatal(http.ListenAndServe(":8080", proxy))
+	log.Println("Proxy rodando na porta 8081")
+	log.Fatal(http.ListenAndServe(":8081", proxy))
+
+}
+
+func saveHARToFile(filename string) {
+
+	harMutex.RLock()
+	defer harMutex.RUnlock()
+
+	file, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+
+	if err != nil {
+		log.Println("[Erro ao abrir arquivo HAR]", err)
+		return
+	}
+	defer file.Close()
+
+	enc := json.NewEncoder(file)
+	enc.SetIndent("", "	")
+	err = enc.Encode(harLog)
+	if err != nil {
+		log.Println("[Erro ao salvar HAR]", err)
+	}
 
 }
